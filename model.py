@@ -2,9 +2,25 @@ import numpy as np
 from sklearn.svm import SVR
 from utils import *
 
+
 class S3VR():
+    """
+    The S3VR class used to do semi-surpervised regression tasks
+    """
     def __init__(self, k_local, k_global, r, beta):
+        """Initialization
+
+        Args:
+            k_local (int): k values for PLR_local
+            k_global (int): k values for PLR_global
+            r (float): probability threshold for choosing data pointsw
+            beta (float): variance parameter
+        """
         self.svr = None
+        self.labeled_X = None
+        self.unlabeled_X = None
+        self.y = None
+
         self.k_local = k_local
         self.k_global = k_global
         self.r = r
@@ -12,17 +28,56 @@ class S3VR():
         return
 
     def rbf(self, x1, x2, l=1):
+        """Calulate the kernel mappings for x1 and x2
+
+        Args:
+            x1 (np.ndarray): the x1 with shape (n_1, d)
+            x2 (np.ndarray): the x2 with shape (n_2, d)
+            l (int, optional): the parameter of normal distribution. Defaults to 1.
+
+        Returns:
+            np.ndarray: the rbf kernel vectors
+        """
         if ((x1-x2)**2).ndim > 1:
             return np.exp(-1 / (2 * (l**2)) * ((x1-x2)**2).sum(axis=1))
         else:
             return np.array([np.exp(-1 / (2 * (l**2)) * ((x1-x2)**2).sum())])
 
     def find_nn(self, point, k):
+        """Find the k nearest neighbors of the point
+
+        Args:
+            point (np.ndarray): the data point with shape (d,)
+            k (int): the number of nearest neighbors
+
+        Raises:
+            ValueError: the labeled X is not loaded
+
+        Returns:
+            np.ndarray: the matrix of the nearest neighbors with shape (k, d)
+        """
+        if self.labeled_X is None:
+            raise ValueError("Not load datasets")
+
         dist = np.linalg.norm(self.labeled_X - point, axis=1)
         index = np.argsort(dist)[:k]
         return self.labeled_X[index], index
 
     def estimate_distribution(self, is_local):
+        """Estimate the distribution
+
+        Args:
+            is_local (bool): whether use k_local or k_global
+
+        Raises:
+            ValueError: the datasets are not loaded
+
+        Returns:
+            np.ndarray, np.ndarray, int: the y_bar with shape (n_unlabeled,), the sigma_2_hat with shape (n_unlabeled,), the number of data points
+        """
+        if (self.labeled_X is None) or (self.unlabeled_X is None) or (self.y is None):
+            raise ValueError("Not load datasets")
+
         k = self.k_local if is_local else self.k_global
 
         ones = np.ones((k, 1))
@@ -45,10 +100,18 @@ class S3VR():
 
         return y_hat, sigma_2_hat, num
 
-    def data_generation(self, labeled_X, y, unlabeled_X):
-        self.labeled_X = labeled_X
-        self.y = y
-        self.unlabeled_X = unlabeled_X
+    def data_generation(self):
+        """Generate the combined training datasets
+
+        Raises:
+            ValueError: the datasets are not loaded
+
+        Returns:
+            np.ndarray, np.ndarray: the combined training X with shape (n_combined, d) and y with shape (n_combined,)
+        """
+        if (self.labeled_X is None) or (self.unlabeled_X is None) or (self.y is None):
+            raise ValueError("Not load datasets")
+
         # estimate distribution
         y_local, sigma_2_local, n = self.estimate_distribution(True)
         y_global, sigma_2_global, _ = self.estimate_distribution(False)
@@ -66,17 +129,39 @@ class S3VR():
         # Equation (12), S3VR paper
         pu = (sigma_2_conjugate - min_sigma_2) / (max_sigma_2 - min_sigma_2)
         X_hat = np.vstack((self.labeled_X.copy(), self.unlabeled_X[(pu >= self.r).reshape(-1,)]))
-        y_hat = np.append(y.copy(), y_bar_conjugate[pu >= self.r])
+        y_hat = np.append(self.y.copy(), y_bar_conjugate[pu >= self.r])
 
         return X_hat, y_hat
 
     def fit(self, labeled_X, y, unlabeled_X):
-        X_hat, y_hat = self.data_generation(labeled_X, y, unlabeled_X)
+        """Train the S3VR model on the datasets
+
+        Args:
+            labeled_X (np.ndarray): the labeled X with shape (n_labeled, d)
+            y (np.ndarray): the labels with shape (n_labeled,) corresponding to the labeled X
+            unlabeled_X (np.ndarray): the unlabeled X with shape (n_unlabeled, d)
+        """
+        self.labeled_X = labeled_X
+        self.y = y
+        self.unlabeled_X = unlabeled_X
+
+        X_hat, y_hat = self.data_generation()
         self.svr = SVR()
         self.svr.fit(X_hat, y_hat)
         print(f'The training rmse is {RMSE(y_hat, self.svr.predict(X_hat))}')
 
     def predict(self, X):
+        """Predict on X using the trained S3VR model
+
+        Args:
+            X (np.ndarray): the datasets to be predicted with shape (n_X, d)
+
+        Raises:
+            ValueError: the svr is not trained
+
+        Returns:
+            np.ndarray: the predictions of the dataset X with shape (n_X,)
+        """
         if not self.svr:
             raise ValueError("No SVR is fitted.")
 
