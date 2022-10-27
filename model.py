@@ -1,67 +1,84 @@
 import numpy as np
-# import tensorflow as tf
-import tensorflow.compat.v1 as tf
-tf.disable_v2_behavior()
+from sklearn.svm import SVR
+from utils import *
 
-class SVR(object):
-    def __init__(self, epsilon=0.5):
-        self.epsilon = epsilon
+class S3VR():
+    def __init__(self, k_local, k_global, r, beta):
+        self.svr = None
+        self.k_local = k_local
+        self.k_global = k_global
+        self.r = r
+        self.beta = beta
+        return
 
-    def fit(self, X, y, epochs=100, learning_rate=0.1):
-        self.sess = tf.Session()
+    def rbf(self, x1, x2, l=1):
+        if ((x1-x2)**2).ndim > 1:
+            return np.exp(-1 / (2 * (l**2)) * ((x1-x2)**2).sum(axis=1))
+        else:
+            return np.array([np.exp(-1 / (2 * (l**2)) * ((x1-x2)**2).sum())])
 
-        feature_len = X.shape[-1] if len(X.shape) > 1 else 1
+    def find_nn(self, point, k):
+        dist = np.linalg.norm(self.labeled_X - point, axis=1)
+        index = np.argsort(dist)[:k]
+        return self.labeled_X[index], index
 
-        if len(X.shape) == 1:
-            X = X.reshape(-1, 1)
-        if len(y.shape) == 1:
-            y = y.reshape(-1, 1)
+    def estimate_distribution(self, is_local):
+        k = self.k_local if is_local else self.k_global
 
-        self.X = tf.placeholder(dtype=tf.float32, shape=(None, feature_len))
-        self.y = tf.placeholder(dtype=tf.float32, shape=(None, 1))
+        ones = np.ones((k, 1))
+        num = self.unlabeled_X.shape[0]
+        y_hat = np.zeros((num, 1))
+        sigma_2_hat = np.zeros((num, 1))
 
-        self.W = tf.Variable(tf.random_normal(shape=(feature_len, 1)))
-        self.b = tf.Variable(tf.random_normal(shape=(1,)))
+        for i in range(num):
+            nn, nn_index = self.find_nn(self.unlabeled_X[i], k)
+            k_star = self.rbf(self.unlabeled_X[i], nn).reshape(-1, 1)
+            K_hat = self.rbf(nn, nn) - ones @ k_star.T - k_star @ ones.T + self.rbf(self.unlabeled_X[i], self.unlabeled_X[i]) * ones @ ones.T
+            # Equation (15), PLR paper
+            cov = (self.beta * K_hat + np.identity(k))
+            # Equation (14), PLR paper
+            mu = cov @ (ones/k)
+            y_bar_nn = self.y[nn_index].sum(axis=0) / k
+            diff = self.y[nn_index].reshape(-1, 1) - y_bar_nn * ones
+            y_hat[i] = y_bar_nn + mu.T @ diff
+            sigma_2_hat[i] = diff.T @ cov @ diff / k
 
-        self.y_pred = tf.matmul(self.X, self.W) + self.b
+        return y_hat, sigma_2_hat, num
 
-        # Second part of following equation, loss is a function of how much the error exceeds a defined value, epsilon
-        # Error lower than epsilon = no penalty.
-        self.loss = tf.norm(self.W)/2 + tf.reduce_mean(tf.maximum(0., tf.abs(self.y_pred - self.y) - self.epsilon))
+    def data_generation(self, labeled_X, y, unlabeled_X):
+        self.labeled_X = labeled_X
+        self.y = y
+        self.unlabeled_X = unlabeled_X
+        # estimate distribution
+        y_local, sigma_2_local, n = self.estimate_distribution(True)
+        y_global, sigma_2_global, _ = self.estimate_distribution(False)
 
-        opt = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
-        opt_op = opt.minimize(self.loss)
+        # avoid dividing by zero
+        sigma_2_local[sigma_2_local == 0] = 1e-20
 
-        self.sess.run(tf.global_variables_initializer())
+        # conjugate
+        # Equation (11), S3VR paper
+        y_bar_conjugate = (y_global/sigma_2_global + n*y_local/sigma_2_local) / (1/sigma_2_global + n/sigma_2_local)
+        sigma_2_conjugate = 1 / (1/sigma_2_global + n/sigma_2_local)
 
-        for i in range(epochs):
-            loss = self.sess.run(
-                self.loss,
-                {
-                    self.X: X,
-                    self.y: y
-                }
-            )
-            print("{}/{}: loss: {}".format(i + 1, epochs, loss))
+        # generate
+        max_sigma_2, min_sigma_2 = sigma_2_conjugate.max(), sigma_2_conjugate.min()
+        # Equation (12), S3VR paper
+        pu = (sigma_2_conjugate - min_sigma_2) / (max_sigma_2 - min_sigma_2)
+        X_hat = np.vstack((self.labeled_X.copy(), self.unlabeled_X[(pu >= self.r).reshape(-1,)]))
+        y_hat = np.append(y.copy(), y_bar_conjugate[pu >= self.r])
 
-            self.sess.run(
-                opt_op,
-                {
-                    self.X: X,
-                    self.y: y
-                }
-            )
+        return X_hat, y_hat
 
-        return self
+    def fit(self, labeled_X, y, unlabeled_X):
+        X_hat, y_hat = self.data_generation(labeled_X, y, unlabeled_X)
+        self.svr = SVR()
+        self.svr.fit(X_hat, y_hat)
+        print(f'The training rmse is {RMSE(y_hat, self.svr.predict(X_hat))}')
 
-    def predict(self, X, y=None):
-        if len(X.shape) == 1:
-            X = X.reshape(-1, 1)
+    def predict(self, X):
+        if not self.svr:
+            raise ValueError("No SVR is fitted.")
 
-        y_pred = self.sess.run(
-            self.y_pred,
-            {
-                self.X: X
-            }
-        )
-        return y_pred
+        return self.svr.predict(X)
+
