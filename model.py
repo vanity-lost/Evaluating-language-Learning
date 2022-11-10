@@ -1,7 +1,7 @@
 import numpy as np
 from sklearn.svm import SVR
 from utils import *
-
+from sklearn.metrics.pairwise import euclidean_distances
 
 class S3VR():
     """
@@ -20,12 +20,12 @@ class S3VR():
         self.labeled_X = None
         self.unlabeled_X = None
         self.y = None
+        self.dist = None
 
         self.k_local = k_local
         self.k_global = k_global
         self.r = r
         self.beta = beta
-        return
 
     def rbf(self, x1, x2, l=1):
         """Calulate the kernel mappings for x1 and x2
@@ -43,7 +43,13 @@ class S3VR():
         else:
             return np.array([np.exp(-1 / (2 * (l**2)) * ((x1-x2)**2).sum())])
 
-    def find_nn(self, point, k):
+    def calc_distance(self):
+        """Calculate the Euclidean distance and sort
+        """
+        self.dist = euclidean_distances(self.unlabeled_X, self.labeled_X)
+        self.dist = np.argsort(self.dist, axis=1)
+
+    def find_nn(self, index, k):
         """Find the k nearest neighbors of the point
 
         Args:
@@ -58,9 +64,9 @@ class S3VR():
         """
         if self.labeled_X is None:
             raise ValueError("Not load datasets")
-
-        dist = np.linalg.norm(self.labeled_X - point, axis=1)
-        index = np.argsort(dist)[:k]
+        if self.dist is None:
+            self.calc_distance()
+        index = self.dist[index, :k]
         return self.labeled_X[index], index
 
     def estimate_distribution(self, is_local):
@@ -86,7 +92,7 @@ class S3VR():
         sigma_2_hat = np.zeros((num, 1))
 
         for i in range(num):
-            nn, nn_index = self.find_nn(self.unlabeled_X[i], k)
+            nn, nn_index = self.find_nn(i, k)
             k_star = self.rbf(self.unlabeled_X[i], nn).reshape(-1, 1)
             K_hat = self.rbf(nn, nn) - ones @ k_star.T - k_star @ ones.T + self.rbf(self.unlabeled_X[i], self.unlabeled_X[i]) * ones @ ones.T
             # Equation (15), PLR paper
@@ -118,6 +124,7 @@ class S3VR():
 
         # avoid dividing by zero
         sigma_2_local[sigma_2_local == 0] = 1e-20
+        sigma_2_global[sigma_2_global == 0] = 1e-20
 
         # conjugate
         # Equation (11), S3VR paper
@@ -146,9 +153,8 @@ class S3VR():
         self.unlabeled_X = unlabeled_X
 
         X_hat, y_hat = self.data_generation()
-        self.svr = SVR()
+        self.svr = SVR(C=0.1)
         self.svr.fit(X_hat, y_hat)
-        print(f'The training rmse is {RMSE(y_hat, self.svr.predict(X_hat))}')
 
     def predict(self, X):
         """Predict on X using the trained S3VR model
