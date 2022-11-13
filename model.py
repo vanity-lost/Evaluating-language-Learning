@@ -7,7 +7,7 @@ class S3VR():
     """
     The S3VR class used to do semi-surpervised regression tasks
     """
-    def __init__(self, k_local, k_global, r, beta):
+    def __init__(self, k_local, k_global, r, beta, C, epsilon):
         """Initialization
 
         Args:
@@ -16,7 +16,7 @@ class S3VR():
             r (float): probability threshold for choosing data pointsw
             beta (float): variance parameter
         """
-        self.svr = None
+        self.svrs = None
         self.labeled_X = None
         self.unlabeled_X = None
         self.y = None
@@ -26,6 +26,8 @@ class S3VR():
         self.k_global = k_global
         self.r = r
         self.beta = beta
+        self.C = C
+        self.epsilon = epsilon
 
     def rbf(self, x1, x2, l=1):
         """Calulate the kernel mappings for x1 and x2
@@ -88,8 +90,8 @@ class S3VR():
 
         ones = np.ones((k, 1))
         num = self.unlabeled_X.shape[0]
-        y_hat = np.zeros((num, 1))
-        sigma_2_hat = np.zeros((num, 1))
+        y_hat = np.zeros((num, self.y.shape[1]))
+        sigma_2_hat = np.zeros((num, self.y.shape[1]))
 
         for i in range(num):
             nn, nn_index = self.find_nn(i, k)
@@ -99,10 +101,10 @@ class S3VR():
             cov = (self.beta * K_hat + np.identity(k))
             # Equation (14), PLR paper
             mu = cov @ (ones/k)
-            y_bar_nn = self.y[nn_index].sum(axis=0) / k
-            diff = self.y[nn_index].reshape(-1, 1) - y_bar_nn * ones
+            y_bar_nn = self.y[nn_index].mean(axis=0)
+            diff = self.y[nn_index] - y_bar_nn * ones
             y_hat[i] = y_bar_nn + mu.T @ diff
-            sigma_2_hat[i] = diff.T @ cov @ diff / k
+            sigma_2_hat[i] = [diff[:, i].T @ cov @ diff[:, i] / k for i in range(self.y.shape[1])]
 
         return y_hat, sigma_2_hat, num
 
@@ -132,13 +134,15 @@ class S3VR():
         sigma_2_conjugate = 1 / (1/sigma_2_global + n/sigma_2_local)
 
         # generate
-        max_sigma_2, min_sigma_2 = sigma_2_conjugate.max(), sigma_2_conjugate.min()
+        max_sigma_2, min_sigma_2 = sigma_2_conjugate.max(axis=0), sigma_2_conjugate.min(axis=0)
         # Equation (12), S3VR paper
         pu = (sigma_2_conjugate - min_sigma_2) / (max_sigma_2 - min_sigma_2)
-        X_hat = np.vstack((self.labeled_X.copy(), self.unlabeled_X[(pu >= self.r).reshape(-1,)]))
-        y_hat = np.append(self.y.copy(), y_bar_conjugate[pu >= self.r])
+        self.X_hat, self.y_hat = [], []
+        for i in range(self.y.shape[1]):
+            self.X_hat.append(np.vstack((self.labeled_X, self.unlabeled_X[(pu[:, i] >= self.r).reshape(-1,)])))
+            self.y_hat.append(np.hstack((self.y[:, i], y_bar_conjugate[:, i][(pu[:, i] >= self.r).reshape(-1,)])))
 
-        return X_hat, y_hat
+        return self.X_hat, self.y_hat
 
     def fit(self, labeled_X, y, unlabeled_X):
         """Train the S3VR model on the datasets
@@ -152,9 +156,12 @@ class S3VR():
         self.y = y
         self.unlabeled_X = unlabeled_X
 
-        X_hat, y_hat = self.data_generation()
-        self.svr = SVR(C=0.1)
-        self.svr.fit(X_hat, y_hat)
+        self.data_generation()
+        self.svrs = []
+        for i in range(self.y.shape[1]):
+            svr = SVR(C=self.C, epsilon=self.epsilon)
+            svr.fit(self.X_hat[i], self.y_hat[i])
+            self.svrs.append(svr)
 
     def predict(self, X):
         """Predict on X using the trained S3VR model
@@ -168,8 +175,13 @@ class S3VR():
         Returns:
             np.ndarray: the predictions of the dataset X with shape (n_X,)
         """
-        if not self.svr:
+        if not self.svrs:
+            raise ValueError("No SVR is fitted.")
+        if self.y is None:
             raise ValueError("No SVR is fitted.")
 
-        return self.svr.predict(X)
+        preds = np.zeros((X.shape[0], self.y.shape[1]))
+        for i in range(self.y.shape[1]):
+            preds[:, i] = self.svrs[i].predict(X)
 
+        return preds
