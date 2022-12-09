@@ -1,6 +1,7 @@
 TRAIN_DIR = {
     'current': './dataset/current/train.csv',
     'old': './dataset/old/train.csv',
+    'old2': './dataset/old-2/train.csv',
     'hewlett': './dataset/hewlett/train.csv'
 }
 TEST_DIR = 'test.csv'
